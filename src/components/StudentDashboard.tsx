@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
+import jsQR from 'jsqr';
 import {
-  Camera, CheckCircle2, XCircle, MapPin, ScanLine, Calendar,
-  TrendingUp, History, X, Loader2, Clock, BookOpen,
+  Camera, CheckCircle2, ScanLine, Calendar,
+  TrendingUp, History, Loader2, Clock, BookOpen, Upload, ImageIcon,
 } from 'lucide-react';
 import { addRecord, getRecords } from '@/lib/storage';
 import { decodeQR } from '@/lib/qr';
@@ -26,46 +26,126 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
   const [rollNumber, setRollNumber] = useState('');
   const [error, setError] = useState('');
   const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>('today');
-  const scannerRef = useRef<Html5Qrcode | null>(null);
-  const containerId = 'qr-reader-container';
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const { toast } = useToast();
 
-  const stopScanner = useCallback(async () => {
-    if (scannerRef.current) {
-      try {
-        await scannerRef.current.stop();
-        await scannerRef.current.clear();
-      } catch {
-        // ignore
-      }
-      scannerRef.current = null;
+  const stopScanner = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
   }, []);
+
+  const handleDecoded = useCallback(
+    (text: string) => {
+      const data = decodeQR(text);
+      if (data) {
+        setQrPayload(data);
+        setScanState('verifying');
+        stopScanner();
+      }
+    },
+    [stopScanner]
+  );
+
+  const scanFrame = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      rafRef.current = requestAnimationFrame(scanFrame);
+      return;
+    }
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (w === 0 || h === 0) {
+      rafRef.current = requestAnimationFrame(scanFrame);
+      return;
+    }
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, w, h);
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const code = jsQR(imageData.data, imageData.width, imageData.height, {
+      inversionAttempts: 'dontInvert',
+    });
+    if (code && code.data) {
+      handleDecoded(code.data);
+      return;
+    }
+    rafRef.current = requestAnimationFrame(scanFrame);
+  }, [handleDecoded]);
 
   const startScanner = useCallback(async () => {
     setError('');
     setScanState('scanning');
+    // Wait for the video element to be rendered before starting
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const video = videoRef.current;
+    if (!video) {
+      setError('Camera element not ready. Please try again.');
+      setScanState('idle');
+      return;
+    }
     try {
-      const scanner = new Html5Qrcode(containerId);
-      scannerRef.current = scanner;
-      await scanner.start(
-        { facingMode: 'environment' },
-        { fps: 10, qrbox: { width: 220, height: 220 } },
-        (decodedText) => {
-          const data = decodeQR(decodedText);
-          if (data) {
-            setQrPayload(data);
-            setScanState('verifying');
-            stopScanner();
-          }
-        },
-        () => {}
-      );
-    } catch {
-      setError('Could not access camera. Please grant camera permissions.');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      video.srcObject = stream;
+      await video.play();
+      rafRef.current = requestAnimationFrame(scanFrame);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Could not access camera: ${msg}. Check permissions or use the Upload QR Image option below.`);
       setScanState('idle');
     }
-  }, [stopScanner]);
+  }, [scanFrame]);
+
+  const handleFileUpload = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, img.width, img.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'attemptBoth',
+        });
+        if (code && code.data) {
+          handleDecoded(code.data);
+        } else {
+          toast('No QR code found in the uploaded image. Try a clearer photo.', 'error');
+        }
+        URL.revokeObjectURL(img.src);
+      };
+      img.onerror = () => {
+        toast('Could not load the image file.', 'error');
+      };
+      img.src = URL.createObjectURL(file);
+      e.target.value = '';
+    },
+    [handleDecoded, toast]
+  );
 
   // Geofence verification
   useEffect(() => {
@@ -112,7 +192,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
   }, [scanState, qrPayload, user.email, toast]);
 
   useEffect(() => {
-    return () => { void stopScanner(); };
+    return () => stopScanner();
   }, [stopScanner]);
 
   const markAttendance = () => {
@@ -191,13 +271,29 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
               <p className="text-sm text-slate-500 dark:text-slate-400 mb-5 text-center max-w-xs">
                 Scan your teacher's QR code. Your GPS location will be checked against campus coordinates.
               </p>
-              <button
-                onClick={startScanner}
-                className="px-6 py-3 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition flex items-center gap-2"
-              >
-                <Camera className="w-5 h-5" />
-                Start Camera
-              </button>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <button
+                  onClick={startScanner}
+                  className="px-6 py-3 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition flex items-center gap-2"
+                >
+                  <Camera className="w-5 h-5" />
+                  Start Camera
+                </button>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-6 py-3 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition flex items-center gap-2"
+                >
+                  <Upload className="w-5 h-5" />
+                  Upload QR Image
+                </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
               {error && (
                 <p className="mt-4 text-sm text-red-600 dark:text-red-400 text-center max-w-xs">{error}</p>
               )}
@@ -207,18 +303,40 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           {scanState === 'scanning' && (
             <div className="flex flex-col items-center">
               <div className="w-full max-w-sm aspect-square rounded-xl overflow-hidden border border-slate-200 dark:border-slate-600 bg-slate-900 relative">
-                <div id={containerId} className="w-full h-full" />
+                <video
+                  ref={videoRef}
+                  className="w-full h-full object-cover"
+                  playsInline
+                  muted
+                />
+                <canvas ref={canvasRef} className="hidden" />
                 <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                   <div className="w-56 h-56 border-2 border-white/70 rounded-xl" />
                 </div>
               </div>
               <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">Align QR within the frame</p>
-              <button
-                onClick={() => { stopScanner(); setScanState('idle'); }}
-                className="mt-3 px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition"
-              >
-                Cancel
-              </button>
+              <div className="flex gap-3 mt-3">
+                <button
+                  onClick={() => { stopScanner(); setScanState('idle'); }}
+                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition flex items-center gap-1.5"
+                >
+                  <ImageIcon className="w-4 h-4" />
+                  Upload Instead
+                </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
             </div>
           )}
 
