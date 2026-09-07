@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ScanLine, Sun, Moon, LogOut, GraduationCap, User as UserIcon, Loader2 } from 'lucide-react';
 import { getCurrentUser, logout } from '@/lib/auth';
-import { supabase, fetchAttendanceRecords } from '@/lib/supabase';
+import { supabase, fetchAttendanceRecords, isSupabaseConfigured } from '@/lib/supabase';
 import type { DBAttendanceRecord, User } from '@/lib/types';
 import { ToastProvider } from '@/components/Toast';
 import Login from '@/components/Login';
@@ -53,7 +53,7 @@ function AppInner() {
 
   // Realtime subscription: update records when a new attendance is inserted
   useEffect(() => {
-    if (!user) return;
+    if (!user || !isSupabaseConfigured || !supabase) return;
     const channel = supabase
       .channel('attendance_changes')
       .on(
@@ -74,7 +74,7 @@ function AppInner() {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      if (supabase) supabase.removeChannel(channel);
     };
   }, [user, refreshRecords]);
 

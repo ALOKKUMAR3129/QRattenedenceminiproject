@@ -5,7 +5,6 @@ import type { DBAttendanceRecord, User } from '@/lib/types';
 import { getTodayEntries, isClassStarted, isClassActive, formatTime } from '@/lib/timetable';
 import { encodeQR, generateToken } from '@/lib/qr';
 import {
-  supabase,
   createActiveSession,
   expireOldSessions,
   clearAttendanceRecords,

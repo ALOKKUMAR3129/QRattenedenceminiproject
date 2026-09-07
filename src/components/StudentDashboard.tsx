@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import jsQR from 'jsqr';
 import {
   Camera, CheckCircle2, ScanLine, Calendar,
-  TrendingUp, History, Loader2, Clock, BookOpen, MapPin, Zap,
+  TrendingUp, History, Loader2, Clock, BookOpen, MapPin, Zap, SwitchCamera,
 } from 'lucide-react';
 import { decodeQR } from '@/lib/qr';
 import type { DBAttendanceRecord, QRPayload, User } from '@/lib/types';
@@ -33,6 +33,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
   const [error, setError] = useState('');
   const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>('today');
   const [bypassGeofence, setBypassGeofence] = useState(false);
+  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -96,7 +97,22 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
     rafRef.current = requestAnimationFrame(scanFrame);
   }, [handleDecoded]);
 
-  const startScanner = useCallback(async () => {
+  const getCameraConstraints = useCallback((mode: 'environment' | 'user') => {
+    const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    if (isMobile && mode === 'environment') {
+      return {
+        video: { facingMode: { exact: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
+      };
+    }
+    return {
+      video: { facingMode: mode, width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    };
+  }, []);
+
+  const startScanner = useCallback(async (mode?: 'environment' | 'user') => {
+    const useMode = mode || facingMode;
     setError('');
     setScanState('scanning');
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -107,10 +123,15 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false,
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(getCameraConstraints(useMode));
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: useMode, width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+      }
       streamRef.current = stream;
       video.srcObject = stream;
       await video.play();
@@ -120,7 +141,14 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
       setError(`Could not access camera: ${msg}. Please check camera permissions and try again.`);
       setScanState('idle');
     }
-  }, [scanFrame]);
+  }, [scanFrame, facingMode, getCameraConstraints]);
+
+  const switchCamera = useCallback(async () => {
+    const newMode = facingMode === 'environment' ? 'user' : 'environment';
+    setFacingMode(newMode);
+    stopScanner();
+    await startScanner(newMode);
+  }, [facingMode, startScanner, stopScanner]);
 
   // Verification: validate session token in Supabase, then geofence, then duplicate check
   useEffect(() => {
@@ -287,7 +315,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
                 Scan your teacher's QR code. Your GPS location will be checked against campus coordinates.
               </p>
               <button
-                onClick={startScanner}
+                onClick={() => startScanner()}
                 className="px-6 py-3 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition flex items-center gap-2"
               >
                 <Camera className="w-5 h-5" />
@@ -312,14 +340,30 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
                 <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                   <div className="w-56 h-56 border-2 border-white/70 rounded-xl" />
                 </div>
+                <button
+                  onClick={switchCamera}
+                  className="absolute top-3 right-3 p-2.5 rounded-full bg-black/50 text-white hover:bg-black/70 transition backdrop-blur-sm"
+                  title="Switch camera"
+                >
+                  <SwitchCamera className="w-5 h-5" />
+                </button>
               </div>
               <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">Align QR within the frame</p>
-              <button
-                onClick={() => { stopScanner(); setScanState('idle'); }}
-                className="mt-3 px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition"
-              >
-                Cancel
-              </button>
+              <div className="flex gap-2 mt-3">
+                <button
+                  onClick={switchCamera}
+                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition flex items-center gap-1.5"
+                >
+                  <SwitchCamera className="w-4 h-4" />
+                  Flip Camera
+                </button>
+                <button
+                  onClick={() => { stopScanner(); setScanState('idle'); }}
+                  className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           )}
 
