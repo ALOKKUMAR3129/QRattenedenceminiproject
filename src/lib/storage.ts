@@ -1,35 +1,14 @@
-import type { AttendanceRecord } from './types';
+import type { DBAttendanceRecord } from './types';
 
-const KEY = 'qr-attendance-records';
-
-export function getRecords(): AttendanceRecord[] {
-  try {
-    const raw = localStorage.getItem(KEY);
-    return raw ? (JSON.parse(raw) as AttendanceRecord[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-export function addRecord(record: AttendanceRecord): void {
-  const records = getRecords();
-  records.push(record);
-  localStorage.setItem(KEY, JSON.stringify(records));
-}
-
-export function clearRecords(): void {
-  localStorage.removeItem(KEY);
-}
-
-export function exportToCSV(records: AttendanceRecord[]): void {
-  const headers = ['Student Name', 'Roll Number', 'Subject', 'Date', 'Session Token', 'Timestamp'];
+export function exportToCSV(records: DBAttendanceRecord[]): void {
+  const headers = ['Student Name', 'Student ID', 'Subject', 'Scanned At', 'Teacher ID', 'Status'];
   const rows = records.map((r) => [
-    r.studentName,
-    r.rollNumber,
+    r.student_name,
+    r.student_id,
     r.subject,
-    r.date,
-    r.sessionToken,
-    new Date(r.timestamp).toLocaleString(),
+    new Date(r.scanned_at).toLocaleString(),
+    r.teacher_id || '',
+    r.status,
   ]);
 
   const csv = [headers, ...rows]

@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
-import { ScanLine, Sun, Moon, LogOut, GraduationCap, User as UserIcon } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { ScanLine, Sun, Moon, LogOut, GraduationCap, User as UserIcon, Loader2 } from 'lucide-react';
 import { getCurrentUser, logout } from '@/lib/auth';
-import { getRecords } from '@/lib/storage';
-import type { AttendanceRecord, User } from '@/lib/types';
+import { supabase, fetchAttendanceRecords } from '@/lib/supabase';
+import type { DBAttendanceRecord, User } from '@/lib/types';
 import { ToastProvider } from '@/components/Toast';
 import Login from '@/components/Login';
 import TeacherDashboard from '@/components/TeacherDashboard';
@@ -26,14 +26,57 @@ function useTheme() {
 
 function AppInner() {
   const [user, setUser] = useState<User | null>(() => getCurrentUser());
-  const [records, setRecords] = useState<AttendanceRecord[]>([]);
+  const [records, setRecords] = useState<DBAttendanceRecord[]>([]);
+  const [loading, setLoading] = useState(true);
   const { theme, toggleTheme } = useTheme();
 
-  const refreshRecords = () => setRecords(getRecords());
+  const refreshRecords = useCallback(async () => {
+    try {
+      const data = await fetchAttendanceRecords();
+      setRecords(data);
+    } catch {
+      setRecords([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
+    if (!user) {
+      setRecords([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     refreshRecords();
-  }, [user]);
+  }, [user, refreshRecords]);
+
+  // Realtime subscription: update records when a new attendance is inserted
+  useEffect(() => {
+    if (!user) return;
+    const channel = supabase
+      .channel('attendance_changes')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'attendance_records' },
+        (payload) => {
+          const newRecord = payload.new as DBAttendanceRecord;
+          setRecords((prev) => [newRecord, ...prev]);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'attendance_records' },
+        () => {
+          refreshRecords();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user, refreshRecords]);
 
   if (!user) {
     return <Login onLogin={setUser} theme={theme} onToggleTheme={toggleTheme} />;
@@ -89,15 +132,20 @@ function AppInner() {
 
       {/* Content */}
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
-        {user.role === 'teacher' ? (
-          <TeacherDashboard records={records} onRecordsChange={refreshRecords} />
+        {loading ? (
+          <div className="flex flex-col items-center justify-center py-24 text-slate-400">
+            <Loader2 className="w-8 h-8 animate-spin mb-3 text-blue-500" />
+            <p className="text-sm">Loading attendance data...</p>
+          </div>
+        ) : user.role === 'teacher' ? (
+          <TeacherDashboard user={user} records={records} onRecordsChange={refreshRecords} />
         ) : (
           <StudentDashboard user={user} records={records} onRecordsChange={refreshRecords} />
         )}
       </main>
 
       <footer className="max-w-5xl mx-auto px-4 sm:px-6 py-6 text-center text-xs text-slate-400 dark:text-slate-600">
-        QR Attendance System — demo data stored locally on this device
+        QR Attendance System — powered by Supabase Realtime
       </footer>
     </div>
   );

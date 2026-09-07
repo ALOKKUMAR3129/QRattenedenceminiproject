@@ -7,13 +7,13 @@ export function generateToken(): string {
   return Array.from(array, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-export function encodeQR(subject: string): string {
+export function encodeQR(subject: string, token: string): string {
   const payload: QRPayload = {
     subject,
     timestamp: Date.now(),
     lat: COLLEGE_LAT,
     lng: COLLEGE_LNG,
-    token: generateToken(),
+    token,
   };
   return JSON.stringify(payload);
 }

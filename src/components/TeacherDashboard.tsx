@@ -1,22 +1,36 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { QrCode, Download, Users, Clock, Lock, RefreshCw } from 'lucide-react';
-import { getRecords, clearRecords, exportToCSV } from '@/lib/storage';
-import type { AttendanceRecord } from '@/lib/types';
+import { QrCode, Download, Users, Clock, Lock, RefreshCw, Radio } from 'lucide-react';
+import type { DBAttendanceRecord, User } from '@/lib/types';
 import { getTodayEntries, isClassStarted, isClassActive, formatTime } from '@/lib/timetable';
-import { encodeQR } from '@/lib/qr';
+import { encodeQR, generateToken } from '@/lib/qr';
+import {
+  supabase,
+  createActiveSession,
+  expireOldSessions,
+  clearAttendanceRecords,
+} from '@/lib/supabase';
+import { exportToCSV } from '@/lib/storage';
 import { useToast } from '@/components/Toast';
 import Timetable from '@/components/Timetable';
 
 type TeacherDashboardProps = {
-  records: AttendanceRecord[];
+  user: User;
+  records: DBAttendanceRecord[];
   onRecordsChange: () => void;
 };
 
-export default function TeacherDashboard({ records, onRecordsChange }: TeacherDashboardProps) {
+const QR_REFRESH_MS = 15_000;
+
+export default function TeacherDashboard({ user, records, onRecordsChange }: TeacherDashboardProps) {
   const [selectedClassId, setSelectedClassId] = useState('');
   const [qrData, setQrData] = useState<string | null>(null);
+  const [currentToken, setCurrentToken] = useState('');
   const [now, setNow] = useState(new Date());
+  const [refreshing, setRefreshing] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(15);
+  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { toast } = useToast();
 
   const todayEntries = getTodayEntries();
@@ -27,25 +41,87 @@ export default function TeacherDashboard({ records, onRecordsChange }: TeacherDa
   }, []);
 
   const selectedEntry = todayEntries.find((e) => e.id === selectedClassId);
-
   const canGenerate = selectedEntry ? isClassStarted(selectedEntry, now) : false;
 
-  const generateQR = useCallback(() => {
-    if (!selectedEntry || !canGenerate) return;
-    const data = encodeQR(selectedEntry.subject);
-    setQrData(data);
-    toast(`QR generated for ${selectedEntry.subject}`, 'success');
-  }, [selectedEntry, canGenerate, toast]);
+  const clearTimers = useCallback(() => {
+    if (refreshTimerRef.current) {
+      clearInterval(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+  }, []);
 
-  const handleClear = () => {
-    clearRecords();
-    onRecordsChange();
-    toast('All attendance records cleared', 'info');
+  const refreshQR = useCallback(
+    async (subject: string, teacherId: string, isInitial: boolean) => {
+      setRefreshing(true);
+      try {
+        await expireOldSessions(teacherId);
+        const token = generateToken();
+        await createActiveSession(subject, token, teacherId);
+        setCurrentToken(token);
+        setQrData(encodeQR(subject, token));
+        setSecondsLeft(15);
+        if (!isInitial) {
+          toast('QR refreshed (anti-proxy)', 'info');
+        }
+      } catch {
+        toast('Failed to generate QR. Check connection.', 'error');
+        clearTimers();
+        setQrData(null);
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [toast, clearTimers]
+  );
+
+  const startQRRefresh = useCallback(() => {
+    if (!selectedEntry) return;
+    clearTimers();
+    refreshQR(selectedEntry.subject, user.email, true);
+
+    refreshTimerRef.current = setInterval(() => {
+      refreshQR(selectedEntry.subject, user.email, false);
+    }, QR_REFRESH_MS);
+
+    countdownRef.current = setInterval(() => {
+      setSecondsLeft((s) => (s > 0 ? s - 1 : 15));
+    }, 1000);
+  }, [selectedEntry, user.email, refreshQR, clearTimers]);
+
+  const handleGenerate = () => {
+    if (!canGenerate || !selectedEntry) return;
+    startQRRefresh();
+    toast(`QR generated for ${selectedEntry.subject}`, 'success');
+  };
+
+  const handleSelectClass = (classId: string) => {
+    setSelectedClassId(classId);
+    setQrData(null);
+    setCurrentToken('');
+    clearTimers();
+  };
+
+  useEffect(() => {
+    return () => clearTimers();
+  }, [clearTimers]);
+
+  const handleClear = async () => {
+    try {
+      await clearAttendanceRecords();
+      onRecordsChange();
+      toast('All attendance records cleared', 'info');
+    } catch {
+      toast('Failed to clear records', 'error');
+    }
   };
 
   const handleExport = () => {
-    const toExport = qrData
-      ? records.filter((r) => r.subject === selectedEntry?.subject)
+    const toExport = qrData && selectedEntry
+      ? records.filter((r) => r.subject === selectedEntry.subject)
       : records;
     if (toExport.length === 0) {
       toast('No records to export', 'warning');
@@ -63,7 +139,6 @@ export default function TeacherDashboard({ records, onRecordsChange }: TeacherDa
     <div className="grid lg:grid-cols-2 gap-6">
       {/* Left: QR Generator */}
       <div className="space-y-6">
-        {/* Class selector + QR */}
         <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 p-5">
           <h3 className="text-base font-semibold text-slate-800 dark:text-white mb-4 flex items-center gap-2">
             <QrCode className="w-5 h-5 text-blue-500" />
@@ -85,10 +160,7 @@ export default function TeacherDashboard({ records, onRecordsChange }: TeacherDa
                   return (
                     <button
                       key={entry.id}
-                      onClick={() => {
-                        setSelectedClassId(entry.id);
-                        setQrData(null);
-                      }}
+                      onClick={() => handleSelectClass(entry.id)}
                       className={`w-full flex items-center justify-between p-3 rounded-xl border transition text-left ${
                         selectedClassId === entry.id
                           ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/30'
@@ -116,11 +188,17 @@ export default function TeacherDashboard({ records, onRecordsChange }: TeacherDa
               </div>
 
               <button
-                onClick={generateQR}
-                disabled={!canGenerate}
+                onClick={handleGenerate}
+                disabled={!canGenerate || refreshing}
                 className="w-full px-4 py-3 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {qrData ? <RefreshCw className="w-5 h-5" /> : <QrCode className="w-5 h-5" />}
+                {refreshing ? (
+                  <RefreshCw className="w-5 h-5 animate-spin" />
+                ) : qrData ? (
+                  <RefreshCw className="w-5 h-5" />
+                ) : (
+                  <QrCode className="w-5 h-5" />
+                )}
                 {qrData ? 'Regenerate QR' : 'Generate QR'}
               </button>
 
@@ -139,8 +217,14 @@ export default function TeacherDashboard({ records, onRecordsChange }: TeacherDa
               <div className="bg-white p-4 rounded-xl shadow-sm">
                 <QRCodeSVG value={qrData} size={200} level="M" includeMargin />
               </div>
-              <p className="text-sm text-slate-500 dark:text-slate-400 text-center">
-                Display this QR for students to scan
+              <div className="flex items-center gap-2 text-sm">
+                <Radio className="w-4 h-4 text-green-500 animate-pulse" />
+                <span className="text-slate-600 dark:text-slate-300 font-medium">
+                  Auto-refreshes in {secondsLeft}s
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 dark:text-slate-500 text-center">
+                Anti-proxy: token expires every 15 seconds
               </p>
             </div>
           )}
@@ -158,6 +242,10 @@ export default function TeacherDashboard({ records, onRecordsChange }: TeacherDa
             {filteredRecords.length > 0 && (
               <span className="text-sm font-normal text-slate-400">({filteredRecords.length})</span>
             )}
+            <span className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400 ml-1">
+              <Radio className="w-3 h-3 animate-pulse" />
+              Realtime
+            </span>
           </h3>
           <div className="flex gap-2">
             <button
@@ -189,19 +277,19 @@ export default function TeacherDashboard({ records, onRecordsChange }: TeacherDa
               <thead>
                 <tr className="border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-left">
                   <th className="py-2.5 px-3 font-medium">Name</th>
-                  <th className="py-2.5 px-3 font-medium">Roll</th>
+                  <th className="py-2.5 px-3 font-medium">Student ID</th>
                   <th className="py-2.5 px-3 font-medium">Subject</th>
                   <th className="py-2.5 px-3 font-medium">Time</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredRecords.map((r) => (
-                  <tr key={r.id} className="border-b border-slate-100 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition">
-                    <td className="py-2.5 px-3 text-slate-700 dark:text-slate-200 font-medium">{r.studentName}</td>
-                    <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400">{r.rollNumber}</td>
+                  <tr key={r.id} className="border-b border-slate-100 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition animate-fade-in">
+                    <td className="py-2.5 px-3 text-slate-700 dark:text-slate-200 font-medium">{r.student_name}</td>
+                    <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400">{r.student_id}</td>
                     <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400">{r.subject}</td>
                     <td className="py-2.5 px-3 text-slate-500 dark:text-slate-500 text-xs whitespace-nowrap">
-                      {new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {new Date(r.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </td>
                   </tr>
                 ))}

@@ -2,18 +2,24 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import jsQR from 'jsqr';
 import {
   Camera, CheckCircle2, ScanLine, Calendar,
-  TrendingUp, History, Loader2, Clock, BookOpen,
+  TrendingUp, History, Loader2, Clock, BookOpen, MapPin, Zap,
 } from 'lucide-react';
-import { addRecord, getRecords } from '@/lib/storage';
 import { decodeQR } from '@/lib/qr';
-import type { AttendanceRecord, QRPayload, User } from '@/lib/types';
+import type { DBAttendanceRecord, QRPayload, User } from '@/lib/types';
+import {
+  validateSessionToken,
+  checkDuplicate,
+  insertAttendance,
+  fetchStudentRecords,
+} from '@/lib/supabase';
 import { getCurrentPosition, haversineDistance, COLLEGE_LAT, COLLEGE_LNG } from '@/lib/geo';
 import { getTodayEntries, isClassActive, formatTime } from '@/lib/timetable';
 import { useToast } from '@/components/Toast';
 import Timetable from '@/components/Timetable';
+
 type StudentDashboardProps = {
   user: User;
-  records: AttendanceRecord[];
+  records: DBAttendanceRecord[];
   onRecordsChange: () => void;
 };
 
@@ -23,14 +29,17 @@ type AnalyticsTab = 'today' | 'semester' | 'history';
 export default function StudentDashboard({ user, records, onRecordsChange }: StudentDashboardProps) {
   const [scanState, setScanState] = useState<ScanState>('idle');
   const [qrPayload, setQrPayload] = useState<QRPayload | null>(null);
-  const [rollNumber, setRollNumber] = useState('');
+  const [sessionTeacherId, setSessionTeacherId] = useState('');
   const [error, setError] = useState('');
   const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>('today');
+  const [bypassGeofence, setBypassGeofence] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const { toast } = useToast();
+
+  const myRecords = records.filter((r) => r.student_id === user.email);
 
   const stopScanner = useCallback(() => {
     if (rafRef.current !== null) {
@@ -90,7 +99,6 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
   const startScanner = useCallback(async () => {
     setError('');
     setScanState('scanning');
-    // Wait for the video element to be rendered before starting
     await new Promise((resolve) => setTimeout(resolve, 100));
     const video = videoRef.current;
     if (!video) {
@@ -114,40 +122,66 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
     }
   }, [scanFrame]);
 
-  // Geofence verification
+  // Verification: validate session token in Supabase, then geofence, then duplicate check
   useEffect(() => {
     if (scanState !== 'verifying' || !qrPayload) return;
 
     let cancelled = false;
+
     (async () => {
       try {
-        const pos = await getCurrentPosition();
+        // 1. Validate the session token is active and not expired
+        const session = await validateSessionToken(qrPayload.token);
         if (cancelled) return;
-        const dist = haversineDistance(pos.lat, pos.lng, COLLEGE_LAT, COLLEGE_LNG);
-        if (dist > 500) {
-          toast(`Outside Campus — you are ${Math.round(dist)}m away. Must be within 500m.`, 'error');
+        if (!session) {
+          toast('QR code expired or invalid. Please scan a fresh QR.', 'error');
           setScanState('idle');
           setQrPayload(null);
           return;
         }
-        // Check duplicate
-        const allRecords = getRecords();
-        const isDuplicate = allRecords.some(
-          (r) =>
-            r.sessionToken === qrPayload.token &&
-            r.studentEmail === user.email
-        );
-        if (isDuplicate) {
-          toast('You have already marked attendance for this session.', 'warning');
+        setSessionTeacherId(session.teacher_id || '');
+
+        // 2. Geofence check (unless bypassed)
+        if (!bypassGeofence) {
+          try {
+            const pos = await getCurrentPosition();
+            if (cancelled) return;
+            const dist = haversineDistance(pos.lat, pos.lng, COLLEGE_LAT, COLLEGE_LNG);
+            if (dist > 500) {
+              toast(`Outside Campus — you are ${Math.round(dist)}m away. Must be within 500m.`, 'error');
+              setScanState('idle');
+              setQrPayload(null);
+              return;
+            }
+          } catch (geoErr) {
+            if (cancelled) return;
+            toast(geoErr instanceof Error ? geoErr.message : 'Could not verify location', 'error');
+            setScanState('idle');
+            setQrPayload(null);
+            return;
+          }
+        }
+
+        // 3. Duplicate check via Supabase
+        const isDup = await checkDuplicate(user.email, qrPayload.subject);
+        if (cancelled) return;
+        if (isDup) {
+          toast('Attendance already recorded for this lecture.', 'warning');
           setScanState('idle');
           setQrPayload(null);
           return;
         }
-        toast(`On campus (${Math.round(dist)}m from college). Enter your details.`, 'success');
+
+        // 4. All checks passed — show form
+        if (bypassGeofence) {
+          toast('Demo Mode: geofence bypassed.', 'info');
+        } else {
+          toast('On campus. Ready to mark attendance.', 'success');
+        }
         setScanState('form');
-      } catch (err) {
+      } catch {
         if (cancelled) return;
-        toast(err instanceof Error ? err.message : 'Could not verify location', 'error');
+        toast('Validation failed. Check your connection and try again.', 'error');
         setScanState('idle');
         setQrPayload(null);
       }
@@ -156,64 +190,56 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
     return () => {
       cancelled = true;
     };
-  }, [scanState, qrPayload, user.email, toast]);
+  }, [scanState, qrPayload, user.email, bypassGeofence, toast]);
 
   useEffect(() => {
     return () => stopScanner();
   }, [stopScanner]);
 
-  const markAttendance = () => {
-    if (!qrPayload || !rollNumber.trim()) return;
-    const record: AttendanceRecord = {
-      id: crypto.randomUUID(),
-      studentEmail: user.email,
-      studentName: user.name,
-      rollNumber: rollNumber.trim(),
-      subject: qrPayload.subject,
-      date: new Date(qrPayload.timestamp).toISOString().split('T')[0],
-      sessionToken: qrPayload.token,
-      timestamp: Date.now(),
-    };
-    addRecord(record);
-    onRecordsChange();
-    toast(`Attendance marked for ${qrPayload.subject}!`, 'success');
-    setScanState('success');
+  const markAttendance = async () => {
+    if (!qrPayload) return;
+    setScanState('verifying');
+    try {
+      await insertAttendance(user.email, user.name, qrPayload.subject, sessionTeacherId);
+      onRecordsChange();
+      toast(`Attendance marked for ${qrPayload.subject}!`, 'success');
+      setScanState('success');
+    } catch {
+      toast('Failed to mark attendance. Please try again.', 'error');
+      setScanState('form');
+    }
   };
 
   const reset = () => {
     setQrPayload(null);
-    setRollNumber('');
+    setSessionTeacherId('');
     setError('');
     setScanState('idle');
   };
 
   // Analytics calculations
-  const myRecords = records.filter((r) => r.studentEmail === user.email);
   const todayStr = new Date().toISOString().split('T')[0];
-  const todayRecords = myRecords.filter((r) => r.date === todayStr);
+  const todayRecords = myRecords.filter((r) =>
+    r.scanned_at.startsWith(todayStr)
+  );
   const todayEntries = getTodayEntries();
   const todayPercentage = todayEntries.length > 0
     ? Math.round((todayRecords.length / todayEntries.length) * 100)
     : 0;
 
-  // Semester: unique subjects attended / total unique subjects in timetable
-  const allSubjects = new Set(todayEntries.map((e) => e.subject));
-  // Use all timetable subjects for semester calculation
   const totalSubjects = new Set<string>();
-  // We need all subjects from the full timetable
-  // Import TIMETABLE lazily to avoid circular deps — just compute from records + today
   myRecords.forEach((r) => totalSubjects.add(r.subject));
   const attendedSubjects = totalSubjects.size;
   const semesterPercentage = myRecords.length > 0
     ? Math.min(100, Math.round((myRecords.length / Math.max(myRecords.length, 10)) * 100))
     : 0;
 
-  // Date-wise breakdown
-  const dateMap = new Map<string, AttendanceRecord[]>();
+  const dateMap = new Map<string, DBAttendanceRecord[]>();
   myRecords.forEach((r) => {
-    const arr = dateMap.get(r.date) || [];
+    const dateStr = r.scanned_at.split('T')[0];
+    const arr = dateMap.get(dateStr) || [];
     arr.push(r);
-    dateMap.set(r.date, arr);
+    dateMap.set(dateStr, arr);
   });
   const dateBreakdown = Array.from(dateMap.entries()).sort((a, b) => b[0].localeCompare(a[0]));
 
@@ -225,10 +251,32 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
       {/* Left: Scanner */}
       <div className="space-y-6">
         <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 p-5">
-          <h3 className="text-base font-semibold text-slate-800 dark:text-white mb-4 flex items-center gap-2">
-            <ScanLine className="w-5 h-5 text-blue-500" />
-            Geofenced QR Scanner
-          </h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-base font-semibold text-slate-800 dark:text-white flex items-center gap-2">
+              <ScanLine className="w-5 h-5 text-blue-500" />
+              Geofenced QR Scanner
+            </h3>
+            {/* Demo Mode toggle */}
+            <button
+              onClick={() => setBypassGeofence((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                bypassGeofence
+                  ? 'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-700'
+                  : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 border border-transparent'
+              }`}
+              title="Bypass GPS geofence for testing"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              {bypassGeofence ? 'Demo Mode ON' : 'Demo Mode'}
+            </button>
+          </div>
+
+          {bypassGeofence && (
+            <div className="flex items-center gap-2 mb-4 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-lg px-3 py-2">
+              <MapPin className="w-3.5 h-3.5" />
+              Geofence bypassed — scans will work from any location for testing.
+            </div>
+          )}
 
           {scanState === 'idle' && (
             <div className="flex flex-col items-center py-6">
@@ -278,7 +326,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           {scanState === 'verifying' && (
             <div className="flex flex-col items-center py-10">
               <Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" />
-              <p className="text-sm text-slate-500 dark:text-slate-400">Verifying your location...</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">Verifying session & location...</p>
             </div>
           )}
 
@@ -287,7 +335,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
               <div className="w-14 h-14 rounded-full bg-green-50 dark:bg-green-950/40 flex items-center justify-center mb-3">
                 <CheckCircle2 className="w-7 h-7 text-green-600 dark:text-green-400" />
               </div>
-              <h4 className="text-base font-semibold text-slate-800 dark:text-white mb-1">Location Verified</h4>
+              <h4 className="text-base font-semibold text-slate-800 dark:text-white mb-1">Verified</h4>
               <div className="w-full bg-slate-50 dark:bg-slate-700/30 rounded-lg p-4 mt-3 mb-5 space-y-1.5 text-sm">
                 <div className="flex justify-between">
                   <span className="text-slate-500 dark:text-slate-400">Subject</span>
@@ -301,25 +349,13 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
                 </div>
               </div>
               <div className="w-full space-y-4">
-                <div>
-                  <label className="text-sm font-medium text-slate-600 dark:text-slate-300 mb-1.5 block">Roll Number</label>
-                  <input
-                    type="text"
-                    value={rollNumber}
-                    onChange={(e) => setRollNumber(e.target.value)}
-                    placeholder="Enter your roll number"
-                    className="w-full px-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-                    onKeyDown={(e) => e.key === 'Enter' && markAttendance()}
-                  />
-                </div>
                 <div className="flex gap-3">
                   <button onClick={reset} className="flex-1 px-4 py-2.5 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition">
                     Cancel
                   </button>
                   <button
                     onClick={markAttendance}
-                    disabled={!rollNumber.trim()}
-                    className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition"
                   >
                     Mark Attendance
                   </button>
@@ -354,7 +390,6 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           Attendance Analytics
         </h3>
 
-        {/* Tab switcher */}
         <div className="grid grid-cols-3 gap-1.5 p-1.5 bg-slate-100 dark:bg-slate-700/50 rounded-xl mb-5">
           {([
             { key: 'today', label: 'Today', icon: Calendar },
@@ -379,7 +414,6 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           })}
         </div>
 
-        {/* Today tab */}
         {analyticsTab === 'today' && (
           <div className="animate-fade-in">
             <div className="grid grid-cols-2 gap-3 mb-4">
@@ -433,7 +467,6 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           </div>
         )}
 
-        {/* Semester tab */}
         {analyticsTab === 'semester' && (
           <div className="animate-fade-in flex flex-col items-center py-4">
             <div className="relative w-36 h-36 mb-5">
@@ -470,7 +503,6 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           </div>
         )}
 
-        {/* History tab */}
         {analyticsTab === 'history' && (
           <div className="animate-fade-in">
             {dateBreakdown.length === 0 ? (
@@ -495,7 +527,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
                           <BookOpen className="w-4 h-4 text-slate-400 flex-shrink-0" />
                           <span className="text-sm text-slate-700 dark:text-slate-200 flex-1">{r.subject}</span>
                           <span className="text-xs text-slate-400">
-                            {new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            {new Date(r.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </span>
                           <CheckCircle2 className="w-4 h-4 text-green-500" />
                         </div>

@@ -33,3 +33,23 @@ export type QRPayload = {
   lng: number;
   token: string;
 };
+
+export type DBAttendanceRecord = {
+  id: string;
+  student_id: string;
+  student_name: string;
+  subject: string;
+  scanned_at: string;
+  teacher_id: string | null;
+  status: string;
+};
+
+export type DBActiveSession = {
+  session_id: string;
+  subject: string;
+  qr_token: string;
+  teacher_id: string | null;
+  created_at: string;
+  expires_at: string;
+  is_active: boolean;
+};
