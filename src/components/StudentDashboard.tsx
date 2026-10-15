@@ -10,7 +10,7 @@ import {
   validateSessionToken,
   checkDuplicate,
   insertAttendance,
-  fetchStudentRecords,
+  fetchStudentByEmail,
 } from '@/lib/supabase';
 import { getCurrentPosition, haversineDistance, COLLEGE_LAT, COLLEGE_LNG } from '@/lib/geo';
 import { getTodayEntries, isClassActive, formatTime } from '@/lib/timetable';
@@ -30,6 +30,8 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
   const [scanState, setScanState] = useState<ScanState>('idle');
   const [qrPayload, setQrPayload] = useState<QRPayload | null>(null);
   const [sessionTeacherId, setSessionTeacherId] = useState('');
+  const [sessionId, setSessionId] = useState('');
+  const [studentRollNo, setStudentRollNo] = useState('');
   const [error, setError] = useState('');
   const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>('today');
   const [bypassGeofence, setBypassGeofence] = useState(false);
@@ -168,6 +170,13 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           return;
         }
         setSessionTeacherId(session.teacher_id || '');
+        setSessionId(session.session_id);
+
+        // 1b. Look up student record for roll_no
+        const student = await fetchStudentByEmail(user.email);
+        if (!cancelled) {
+          setStudentRollNo(student?.roll_no || user.email);
+        }
 
         // 2. Geofence check (unless bypassed)
         if (!bypassGeofence) {
@@ -228,7 +237,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
     if (!qrPayload) return;
     setScanState('verifying');
     try {
-      await insertAttendance(user.email, user.name, qrPayload.subject, sessionTeacherId);
+      await insertAttendance(user.email, user.name, qrPayload.subject, sessionTeacherId, studentRollNo, sessionId);
       onRecordsChange();
       toast(`Attendance marked for ${qrPayload.subject}!`, 'success');
       setScanState('success');
@@ -241,6 +250,8 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
   const reset = () => {
     setQrPayload(null);
     setSessionTeacherId('');
+    setSessionId('');
+    setStudentRollNo('');
     setError('');
     setScanState('idle');
   };

@@ -1,13 +1,14 @@
 import type { DBAttendanceRecord } from './types';
 
 export function exportToCSV(records: DBAttendanceRecord[]): void {
-  const headers = ['Student Name', 'Student ID', 'Subject', 'Scanned At', 'Teacher ID', 'Status'];
+  const headers = ['Student Name', 'Roll No', 'Subject', 'Scanned At', 'Teacher ID', 'Session ID', 'Status'];
   const rows = records.map((r) => [
     r.student_name,
-    r.student_id,
+    r.roll_no || r.student_id,
     r.subject,
     new Date(r.scanned_at).toLocaleString(),
     r.teacher_id || '',
+    r.session_id || '',
     r.status,
   ]);
 

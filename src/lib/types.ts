@@ -15,17 +15,6 @@ export type TimetableEntry = {
   room: string;
 };
 
-export type AttendanceRecord = {
-  id: string;
-  studentEmail: string;
-  studentName: string;
-  rollNumber: string;
-  subject: string;
-  date: string;
-  sessionToken: string;
-  timestamp: number;
-};
-
 export type QRPayload = {
   subject: string;
   timestamp: number;
@@ -34,11 +23,31 @@ export type QRPayload = {
   token: string;
 };
 
+export type DBStudent = {
+  id: string;
+  roll_no: string;
+  name: string;
+  email: string;
+  department: string;
+  semester: number;
+};
+
+export type DBTeacher = {
+  id: string;
+  emp_id: string;
+  name: string;
+  email: string;
+  subject: string;
+  department: string;
+};
+
 export type DBAttendanceRecord = {
   id: string;
   student_id: string;
+  roll_no: string | null;
   student_name: string;
   subject: string;
+  session_id: string | null;
   scanned_at: string;
   teacher_id: string | null;
   status: string;

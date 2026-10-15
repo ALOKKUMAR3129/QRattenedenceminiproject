@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { QrCode, Download, Users, Clock, Lock, RefreshCw, Radio } from 'lucide-react';
 import type { DBAttendanceRecord, User } from '@/lib/types';
+import { supabase as supabaseClient, isSupabaseConfigured } from '@/lib/supabase';
 import { getTodayEntries, isClassStarted, isClassActive, formatTime } from '@/lib/timetable';
 import { encodeQR, generateToken } from '@/lib/qr';
 import {
@@ -107,6 +108,34 @@ export default function TeacherDashboard({ user, records, onRecordsChange }: Tea
   useEffect(() => {
     return () => clearTimers();
   }, [clearTimers]);
+
+  // Realtime subscription: live attendance updates
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabaseClient) return;
+    const channel = supabaseClient
+      .channel('public:attendance_records')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'attendance_records' },
+        (payload) => {
+          const newRecord = payload.new as DBAttendanceRecord;
+          onRecordsChange();
+          toast(`${newRecord.student_name} marked attendance for ${newRecord.subject}`, 'success');
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'attendance_records' },
+        () => {
+          onRecordsChange();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      if (supabaseClient) supabaseClient.removeChannel(channel);
+    };
+  }, [onRecordsChange, toast]);
 
   const handleClear = async () => {
     try {
@@ -276,7 +305,7 @@ export default function TeacherDashboard({ user, records, onRecordsChange }: Tea
               <thead>
                 <tr className="border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-left">
                   <th className="py-2.5 px-3 font-medium">Name</th>
-                  <th className="py-2.5 px-3 font-medium">Student ID</th>
+                  <th className="py-2.5 px-3 font-medium">Roll No</th>
                   <th className="py-2.5 px-3 font-medium">Subject</th>
                   <th className="py-2.5 px-3 font-medium">Time</th>
                 </tr>
@@ -285,7 +314,7 @@ export default function TeacherDashboard({ user, records, onRecordsChange }: Tea
                 {filteredRecords.map((r) => (
                   <tr key={r.id} className="border-b border-slate-100 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition animate-fade-in">
                     <td className="py-2.5 px-3 text-slate-700 dark:text-slate-200 font-medium">{r.student_name}</td>
-                    <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400">{r.student_id}</td>
+                    <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400">{r.roll_no || r.student_id}</td>
                     <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400">{r.subject}</td>
                     <td className="py-2.5 px-3 text-slate-500 dark:text-slate-500 text-xs whitespace-nowrap">
                       {new Date(r.scanned_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}

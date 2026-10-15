@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { DBAttendanceRecord, DBActiveSession } from './types';
+import type { DBAttendanceRecord, DBActiveSession, DBStudent, DBTeacher } from './types';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -16,6 +16,8 @@ export const supabase = isSupabaseConfigured
 
 const LS_RECORDS_KEY = 'qr-att-records';
 const LS_SESSIONS_KEY = 'qr-att-sessions';
+const LS_STUDENTS_KEY = 'qr-att-students';
+const LS_TEACHERS_KEY = 'qr-att-teachers';
 
 function lsGetRecords(): DBAttendanceRecord[] {
   try {
@@ -75,6 +77,39 @@ export async function fetchStudentRecords(studentId: string): Promise<DBAttendan
     return (data || []) as DBAttendanceRecord[];
   } catch {
     return lsGetRecords().filter((r) => r.student_id === studentId);
+  }
+}
+
+export async function fetchStudentByEmail(email: string): Promise<DBStudent | null> {
+  if (!isSupabaseConfigured || !supabase) {
+    return null;
+  }
+  try {
+    const { data, error } = await supabase
+      .from('students')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle();
+    if (error) throw error;
+    return data as DBStudent | null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchTeachers(): Promise<DBTeacher[]> {
+  if (!isSupabaseConfigured || !supabase) {
+    return [];
+  }
+  try {
+    const { data, error } = await supabase
+      .from('teachers')
+      .select('*')
+      .order('name', { ascending: true });
+    if (error) throw error;
+    return (data || []) as DBTeacher[];
+  } catch {
+    return [];
   }
 }
 
@@ -162,7 +197,7 @@ export async function createActiveSession(
   subject: string,
   token: string,
   teacherId: string
-): Promise<void> {
+): Promise<DBActiveSession | null> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 15_000);
 
@@ -182,19 +217,24 @@ export async function createActiveSession(
     };
     sessions.push(newSession);
     lsSaveSessions(sessions);
-    return;
+    return newSession;
   }
 
   try {
-    const { error } = await supabase.from('active_sessions').insert({
-      subject,
-      qr_token: token,
-      teacher_id: teacherId,
-      created_at: now.toISOString(),
-      expires_at: expiresAt.toISOString(),
-      is_active: true,
-    });
+    const { data, error } = await supabase
+      .from('active_sessions')
+      .insert({
+        subject,
+        qr_token: token,
+        teacher_id: teacherId,
+        created_at: now.toISOString(),
+        expires_at: expiresAt.toISOString(),
+        is_active: true,
+      })
+      .select()
+      .single();
     if (error) throw error;
+    return data as DBActiveSession;
   } catch {
     const sessions = lsGetSessions();
     const newSession: DBActiveSession = {
@@ -208,6 +248,7 @@ export async function createActiveSession(
     };
     sessions.push(newSession);
     lsSaveSessions(sessions);
+    return newSession;
   }
 }
 
@@ -239,7 +280,9 @@ export async function insertAttendance(
   studentId: string,
   studentName: string,
   subject: string,
-  teacherId: string
+  teacherId: string,
+  rollNo: string,
+  sessionId: string
 ): Promise<void> {
   const scannedAt = new Date().toISOString();
 
@@ -248,11 +291,13 @@ export async function insertAttendance(
     records.unshift({
       id: crypto.randomUUID(),
       student_id: studentId,
+      roll_no: rollNo,
       student_name: studentName,
       subject,
+      session_id: sessionId,
       scanned_at: scannedAt,
       teacher_id: teacherId,
-      status: 'present',
+      status: 'Present',
     });
     lsSaveRecords(records);
     return;
@@ -261,11 +306,13 @@ export async function insertAttendance(
   try {
     const { error } = await supabase.from('attendance_records').insert({
       student_id: studentId,
+      roll_no: rollNo,
       student_name: studentName,
       subject,
+      session_id: sessionId,
       teacher_id: teacherId,
       scanned_at: scannedAt,
-      status: 'present',
+      status: 'Present',
     });
     if (error) throw error;
   } catch {
@@ -273,11 +320,13 @@ export async function insertAttendance(
     records.unshift({
       id: crypto.randomUUID(),
       student_id: studentId,
+      roll_no: rollNo,
       student_name: studentName,
       subject,
+      session_id: sessionId,
       scanned_at: scannedAt,
       teacher_id: teacherId,
-      status: 'present',
+      status: 'Present',
     });
     lsSaveRecords(records);
   }
