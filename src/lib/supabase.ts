@@ -153,10 +153,18 @@ export async function checkDuplicate(
   }
 }
 
+const SESSION_GRACE_MS = 300_000;
+
+function isSessionWithinGrace(session: DBActiveSession, now: Date): boolean {
+  const created = new Date(session.created_at);
+  const elapsed = now.getTime() - created.getTime();
+  return elapsed >= -60_000 && elapsed <= SESSION_GRACE_MS;
+}
+
 export async function validateSessionToken(
   token: string
 ): Promise<DBActiveSession | null> {
-  const nowIso = new Date().toISOString();
+  const now = new Date();
 
   if (!isSupabaseConfigured || !supabase) {
     const sessions = lsGetSessions();
@@ -165,7 +173,7 @@ export async function validateSessionToken(
         (s) =>
           s.qr_token === token &&
           s.is_active &&
-          new Date(s.expires_at) > new Date(nowIso)
+          isSessionWithinGrace(s, now)
       ) || null
     );
   }
@@ -176,10 +184,12 @@ export async function validateSessionToken(
       .select('*')
       .eq('qr_token', token)
       .eq('is_active', true)
-      .gt('expires_at', nowIso)
       .maybeSingle();
     if (error) throw error;
-    return data as DBActiveSession | null;
+    if (!data) return null;
+    const session = data as DBActiveSession;
+    if (!isSessionWithinGrace(session, now)) return null;
+    return session;
   } catch {
     const sessions = lsGetSessions();
     return (
@@ -187,7 +197,7 @@ export async function validateSessionToken(
         (s) =>
           s.qr_token === token &&
           s.is_active &&
-          new Date(s.expires_at) > new Date(nowIso)
+          isSessionWithinGrace(s, now)
       ) || null
     );
   }
@@ -199,12 +209,13 @@ export async function createActiveSession(
   teacherId: string
 ): Promise<DBActiveSession | null> {
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + 180_000);
+  const expiresAt = new Date(now.getTime() + SESSION_GRACE_MS);
 
   if (!isSupabaseConfigured || !supabase) {
     const sessions = lsGetSessions();
     sessions.forEach((s) => {
-      if (new Date(s.expires_at) < now) s.is_active = false;
+      const elapsed = now.getTime() - new Date(s.created_at).getTime();
+      if (elapsed > SESSION_GRACE_MS) s.is_active = false;
     });
     const newSession: DBActiveSession = {
       session_id: crypto.randomUUID(),
@@ -257,7 +268,8 @@ export async function expireOldSessions(teacherId: string): Promise<void> {
     const sessions = lsGetSessions();
     const now = new Date();
     sessions.forEach((s) => {
-      if (s.teacher_id === teacherId && new Date(s.expires_at) < now) {
+      const elapsed = now.getTime() - new Date(s.created_at).getTime();
+      if (s.teacher_id === teacherId && elapsed > SESSION_GRACE_MS) {
         s.is_active = false;
       }
     });
@@ -270,7 +282,7 @@ export async function expireOldSessions(teacherId: string): Promise<void> {
       .from('active_sessions')
       .update({ is_active: false })
       .eq('teacher_id', teacherId)
-      .lt('expires_at', new Date().toISOString());
+      .lt('created_at', new Date(Date.now() - SESSION_GRACE_MS).toISOString());
   } catch {
     // silent fallback
   }
