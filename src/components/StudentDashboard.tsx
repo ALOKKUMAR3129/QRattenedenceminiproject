@@ -12,7 +12,6 @@ import {
   insertAttendance,
   fetchStudentByEmail,
 } from '@/lib/supabase';
-import { getCurrentPosition, haversineDistance, COLLEGE_LAT, COLLEGE_LNG } from '@/lib/geo';
 import { getTodayEntries, isClassActive, formatTime } from '@/lib/timetable';
 import { useToast } from '@/components/Toast';
 import Timetable from '@/components/Timetable';
@@ -151,7 +150,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
     await startScanner(newMode);
   }, [facingMode, startScanner, stopScanner]);
 
-  // Verification: validate session token in Supabase, then geofence, then duplicate check
+  // Verification: validate session token in Supabase, then duplicate check (geofence bypassed)
   useEffect(() => {
     if (scanState !== 'verifying' || !qrPayload) return;
 
@@ -177,26 +176,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           setStudentRollNo(student?.roll_no || user.email);
         }
 
-        // 2. Geofence check (500m tolerance)
-        try {
-          const pos = await getCurrentPosition();
-          if (cancelled) return;
-          const dist = haversineDistance(pos.lat, pos.lng, COLLEGE_LAT, COLLEGE_LNG);
-          if (dist > 500) {
-            toast(`Outside Campus — you are ${Math.round(dist)}m away. Must be within 500m.`, 'error');
-            setScanState('idle');
-            setQrPayload(null);
-            return;
-          }
-        } catch (geoErr) {
-          if (cancelled) return;
-          toast(geoErr instanceof Error ? geoErr.message : 'Could not verify location', 'error');
-          setScanState('idle');
-          setQrPayload(null);
-          return;
-        }
-
-        // 3. Duplicate check via Supabase
+        // 2. Duplicate check via Supabase
         const isDup = await checkDuplicate(user.email, qrPayload.subject);
         if (cancelled) return;
         if (isDup) {
@@ -207,7 +187,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
         }
 
         // 3. All checks passed — show form
-        toast('On campus. Ready to mark attendance.', 'success');
+        toast('QR verified! Ready to mark attendance.', 'success');
         setScanState('form');
       } catch {
         if (cancelled) return;
@@ -296,7 +276,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
                 <ScanLine className="w-8 h-8 text-blue-600 dark:text-blue-400" />
               </div>
               <p className="text-sm text-slate-500 dark:text-slate-400 mb-5 text-center max-w-xs">
-                Scan your teacher's QR code. Your GPS location will be checked against campus coordinates.
+                Scan your teacher's live QR code to mark attendance.
               </p>
               <button
                 onClick={() => startScanner()}
@@ -354,7 +334,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           {scanState === 'verifying' && (
             <div className="flex flex-col items-center py-10">
               <Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" />
-              <p className="text-sm text-slate-500 dark:text-slate-400">Verifying session & location...</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">Verifying session...</p>
             </div>
           )}
 
