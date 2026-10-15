@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import jsQR from 'jsqr';
 import {
   Camera, CheckCircle2, ScanLine, Calendar,
-  TrendingUp, History, Loader2, Clock, BookOpen, MapPin, Zap, SwitchCamera,
+  TrendingUp, History, Loader2, Clock, BookOpen, SwitchCamera,
 } from 'lucide-react';
 import { decodeQR } from '@/lib/qr';
 import type { DBAttendanceRecord, QRPayload, User } from '@/lib/types';
@@ -34,7 +34,6 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
   const [studentRollNo, setStudentRollNo] = useState('');
   const [error, setError] = useState('');
   const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>('today');
-  const [bypassGeofence, setBypassGeofence] = useState(false);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -178,25 +177,23 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           setStudentRollNo(student?.roll_no || user.email);
         }
 
-        // 2. Geofence check (unless bypassed)
-        if (!bypassGeofence) {
-          try {
-            const pos = await getCurrentPosition();
-            if (cancelled) return;
-            const dist = haversineDistance(pos.lat, pos.lng, COLLEGE_LAT, COLLEGE_LNG);
-            if (dist > 500) {
-              toast(`Outside Campus — you are ${Math.round(dist)}m away. Must be within 500m.`, 'error');
-              setScanState('idle');
-              setQrPayload(null);
-              return;
-            }
-          } catch (geoErr) {
-            if (cancelled) return;
-            toast(geoErr instanceof Error ? geoErr.message : 'Could not verify location', 'error');
+        // 2. Geofence check (500m tolerance)
+        try {
+          const pos = await getCurrentPosition();
+          if (cancelled) return;
+          const dist = haversineDistance(pos.lat, pos.lng, COLLEGE_LAT, COLLEGE_LNG);
+          if (dist > 500) {
+            toast(`Outside Campus — you are ${Math.round(dist)}m away. Must be within 500m.`, 'error');
             setScanState('idle');
             setQrPayload(null);
             return;
           }
+        } catch (geoErr) {
+          if (cancelled) return;
+          toast(geoErr instanceof Error ? geoErr.message : 'Could not verify location', 'error');
+          setScanState('idle');
+          setQrPayload(null);
+          return;
         }
 
         // 3. Duplicate check via Supabase
@@ -209,12 +206,8 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
           return;
         }
 
-        // 4. All checks passed — show form
-        if (bypassGeofence) {
-          toast('Demo Mode: geofence bypassed.', 'info');
-        } else {
-          toast('On campus. Ready to mark attendance.', 'success');
-        }
+        // 3. All checks passed — show form
+        toast('On campus. Ready to mark attendance.', 'success');
         setScanState('form');
       } catch {
         if (cancelled) return;
@@ -227,7 +220,7 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
     return () => {
       cancelled = true;
     };
-  }, [scanState, qrPayload, user.email, bypassGeofence, toast]);
+  }, [scanState, qrPayload, user.email, toast]);
 
   useEffect(() => {
     return () => stopScanner();
@@ -290,32 +283,12 @@ export default function StudentDashboard({ user, records, onRecordsChange }: Stu
       {/* Left: Scanner */}
       <div className="space-y-6">
         <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 p-5">
-          <div className="flex items-center justify-between mb-4">
+          <div className="mb-4">
             <h3 className="text-base font-semibold text-slate-800 dark:text-white flex items-center gap-2">
               <ScanLine className="w-5 h-5 text-blue-500" />
-              Geofenced QR Scanner
+              Campus QR Scanner
             </h3>
-            {/* Demo Mode toggle */}
-            <button
-              onClick={() => setBypassGeofence((v) => !v)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                bypassGeofence
-                  ? 'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-700'
-                  : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 border border-transparent'
-              }`}
-              title="Bypass GPS geofence for testing"
-            >
-              <Zap className="w-3.5 h-3.5" />
-              {bypassGeofence ? 'Demo Mode ON' : 'Demo Mode'}
-            </button>
           </div>
-
-          {bypassGeofence && (
-            <div className="flex items-center gap-2 mb-4 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-lg px-3 py-2">
-              <MapPin className="w-3.5 h-3.5" />
-              Geofence bypassed — scans will work from any location for testing.
-            </div>
-          )}
 
           {scanState === 'idle' && (
             <div className="flex flex-col items-center py-6">

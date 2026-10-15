@@ -20,7 +20,8 @@ type TeacherDashboardProps = {
   onRecordsChange: () => void;
 };
 
-const QR_REFRESH_MS = 15_000;
+const QR_REFRESH_MS = 60_000;
+const QR_EXPIRY_SECONDS = 180;
 
 export default function TeacherDashboard({ user, records, onRecordsChange }: TeacherDashboardProps) {
   const [selectedClassId, setSelectedClassId] = useState('');
@@ -28,7 +29,7 @@ export default function TeacherDashboard({ user, records, onRecordsChange }: Tea
   const [currentToken, setCurrentToken] = useState('');
   const [now, setNow] = useState(new Date());
   const [refreshing, setRefreshing] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(15);
+  const [secondsLeft, setSecondsLeft] = useState(180);
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { toast } = useToast();
@@ -63,7 +64,7 @@ export default function TeacherDashboard({ user, records, onRecordsChange }: Tea
         await createActiveSession(subject, token, teacherId);
         setCurrentToken(token);
         setQrData(encodeQR(subject, token));
-        setSecondsLeft(15);
+        setSecondsLeft(180);
         if (!isInitial) {
           toast('QR refreshed (anti-proxy)', 'info');
         }
@@ -88,7 +89,7 @@ export default function TeacherDashboard({ user, records, onRecordsChange }: Tea
     }, QR_REFRESH_MS);
 
     countdownRef.current = setInterval(() => {
-      setSecondsLeft((s) => (s > 0 ? s - 1 : 15));
+      setSecondsLeft((s) => (s > 0 ? s - 1 : 180));
     }, 1000);
   }, [selectedEntry, user.email, refreshQR, clearTimers]);
 
@@ -252,7 +253,7 @@ export default function TeacherDashboard({ user, records, onRecordsChange }: Tea
                 </span>
               </div>
               <p className="text-xs text-slate-400 dark:text-slate-500 text-center">
-                Anti-proxy: token expires every 15 seconds
+                Token valid for 3 minutes — QR refreshes every 60 seconds
               </p>
             </div>
           )}

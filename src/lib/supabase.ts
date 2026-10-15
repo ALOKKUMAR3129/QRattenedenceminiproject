@@ -199,7 +199,7 @@ export async function createActiveSession(
   teacherId: string
 ): Promise<DBActiveSession | null> {
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + 15_000);
+  const expiresAt = new Date(now.getTime() + 180_000);
 
   if (!isSupabaseConfigured || !supabase) {
     const sessions = lsGetSessions();

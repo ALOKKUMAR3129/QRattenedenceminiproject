@@ -125,11 +125,7 @@ export default function Login({ onLogin, theme, onToggleTheme }: LoginProps) {
             </button>
           </form>
 
-          <div className="mt-5 pt-5 border-t border-slate-100 dark:border-slate-700">
-            <p className="text-xs text-slate-400 dark:text-slate-500 text-center">
-              Demo credentials are pre-filled. Just click Sign In.
-            </p>
-          </div>
+
         </div>
       </div>
     </div>
